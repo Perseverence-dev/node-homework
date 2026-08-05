@@ -1,8 +1,12 @@
 const express = require("express");
 
+
 const userRoutes = require("./routes/userRoutes");
 const notFound = require("./middleware/not-found");
 const errorHandler = require("./middleware/error-handler");
+
+const authMiddleware = require("./middleware/auth");
+const taskRouter = require("./routes/taskRoutes");
 
 // Create the Express application.
 const app = express();
@@ -20,6 +24,9 @@ app.use(express.json());
 // Mount the user router.
 // This produces endpoints beginning with /api/users.
 app.use("/api/users", userRoutes);
+
+// Mount the task router with authentication middleware.
+app.use("/api/tasks", authMiddleware, taskRouter);
 
 // Handle requests that did not match any route.
 // This must appear after all real routes.
