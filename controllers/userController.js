@@ -9,6 +9,9 @@ const util = require("util");
 // Import the Joi schema used to validate registration data.
 const { userSchema } = require("../validation/userSchema");
 
+// Import the PostgreSQL connection pool.
+const pool = require("../db/pg-pool");
+
 // Convert crypto.scrypt() into a Promise-based function
 // so it can be used with async and await.
 const scrypt = util.promisify(crypto.scrypt);
@@ -57,9 +60,10 @@ async function comparePassword(inputPassword, storedHash) {
  *
  * @param {object} req - Express request object.
  * @param {object} res - Express response object.
+ * @param {Function} next - Express function for passing unexpected errors.
  * @returns {Promise<object>} The Express response.
  */
-async function register(req, res) {
+async function register(req, res, next) {
   // Joi expects an object. If no request body was sent,
   // use an empty object so validation can return a 400 response.
   if (!req.body) {
@@ -76,7 +80,8 @@ async function register(req, res) {
   // Stop before hashing or storing anything if validation fails.
   if (error) {
     return res.status(400).json({
-      message: error.message,
+      message: "Validation failed",
+      details: error.details,
     });
   }
 
@@ -87,35 +92,40 @@ async function register(req, res) {
   // Hash the validated password before storing the user.
   const hashedPassword = await hashPassword(password);
 
-  // Store only the password hash.
-  // Never store the original plain-text password.
-  const newUser = {
-    name,
-    email,
-    hashedPassword,
-  };
+  try {
+    // Insert the new user using parameter placeholders.
+    // RETURNING sends back only the safe columns needed by the application.
+    const result = await pool.query(
+      `INSERT INTO users (email, name, hashed_password)
+       VALUES ($1, $2, $3)
+       RETURNING id, email, name`,
+      [email, name, hashedPassword],
+    );
 
-  // Add the user to the temporary in-memory users array.
-  global.users.push(newUser);
+    // PostgreSQL returns inserted rows inside result.rows.
+    const newUser = result.rows[0];
 
-  // Temporary debugging: display only safe user information.
-console.log(
-  "Registered users:",
-  global.users.map(({ name, email }) => ({ name, email })),
-);
+    // Temporarily store the new user's numeric database ID.
+    global.user_id = newUser.id;
 
-// Treat the newly registered user as the currently logged-in user.
-global.user_id = newUser;
+    // Return only public user information.
+    // Do not return id, password, or hashed_password.
+    return res.status(201).json({
+      name: newUser.name,
+      email: newUser.email,
+    });
+  } catch (err) {
+    // PostgreSQL error 23505 means a UNIQUE constraint was violated.
+    // In this case, the submitted email already exists.
+    if (err.code === "23505") {
+      return res.status(400).json({
+        message: "Email is already registered.",
+      });
+    }
 
-  // Treat the newly registered user as the logged-in user.
-  global.user_id = newUser;
-
-  // Return only public user information.
-  // Do not return password or hashedPassword.
-  return res.status(201).json({
-    name: newUser.name,
-    email: newUser.email,
-  });
+    // Pass all unexpected database errors to the global error handler.
+    return next(err);
+  }
 }
 
 /**
@@ -123,43 +133,53 @@ global.user_id = newUser;
  *
  * @param {object} req - Express request object.
  * @param {object} res - Express response object.
+ * @param {Function} next - Express function for passing unexpected errors.
  * @returns {Promise<object>} The Express response.
  */
-async function logon(req, res) {
+async function logon(req, res, next) {
   // Read the submitted credentials.
   // The password is used only for comparison and is not stored.
   const { email, password } = req.body || {};
 
-  // Find the user by email only.
-  // We can no longer compare the submitted password directly
-  // because the original password is not stored.
-  const matchingUser = global.users.find(
-    (user) => user.email === email,
-  );
+  try {
+    // Find a user with the submitted email.
+    // $1 is a parameter placeholder that prevents SQL injection.
+    const result = await pool.query(
+      "SELECT id, email, name, hashed_password FROM users WHERE email = $1",
+      [email],
+    );
 
-  // Compare the submitted password with the stored hash.
-  // Short-circuit evaluation prevents comparePassword()
-  // from running when no user was found.
-  const goodCredentials =
-    matchingUser &&
-    (await comparePassword(password, matchingUser.hashedPassword));
+    // result.rows is empty when no matching user exists.
+    const matchingUser = result.rows[0];
 
-  // Return the same generic response whether the email
-  // or password was incorrect.
-  if (!goodCredentials) {
-    return res.status(401).json({
-      message: "Invalid email or password.",
+    // Compare the submitted password with the stored hash.
+    // Short-circuit evaluation prevents comparePassword()
+    // from running when no user was found.
+    const goodCredentials =
+      matchingUser &&
+      password &&
+      (await comparePassword(password, matchingUser.hashed_password));
+
+    // Return the same generic response whether the email
+    // or password was incorrect.
+    if (!goodCredentials) {
+      return res.status(401).json({
+        message: "Invalid email or password.",
+      });
+    }
+
+    // Store the authenticated user's numeric database ID.
+    global.user_id = matchingUser.id;
+
+    // Return only safe, public information.
+    return res.status(200).json({
+      name: matchingUser.name,
+      email: matchingUser.email,
     });
+  } catch (err) {
+    // Pass unexpected database errors to the global error handler.
+    return next(err);
   }
-
-  // Store the authenticated user as the logged-in user.
-  global.user_id = matchingUser;
-
-  // Return only safe, public information.
-  return res.status(200).json({
-    name: matchingUser.name,
-    email: matchingUser.email,
-  });
 }
 
 /**
