@@ -4,18 +4,14 @@ const {
   patchTaskSchema,
 } = require("../validation/taskSchema");
 
-// Import the PostgreSQL connection pool.
-const pool = require("../db/pg-pool");
+// Import the shared Prisma Client.
+const prisma = require("../db/prisma");
 
 // JSDoc comments below
 
 /**
  * Create a task for the currently logged-in user.
  *
- * @param {object} req - Express request object.
- * @param {object} res - Express response object.
- * @param {Function} next - Express function for passing unexpected errors.
- * @returns {Promise<object>} The Express response.
  */
 async function create(req, res, next) {
   // Joi expects an object; if no body was sent, an empty object is used.
@@ -36,17 +32,23 @@ async function create(req, res, next) {
   }
 
   try {
-    // Insert the validated task and associate it with the logged-in user.
+    // Create the validated task and associate it with the logged-in user.
     // PostgreSQL generates the task ID automatically.
-    const result = await pool.query(
-      `INSERT INTO tasks (title, is_completed, user_id)
-       VALUES ($1, $2, $3)
-       RETURNING id, title, is_completed`,
-      [value.title, value.isCompleted, global.user_id],
-    );
+    const newTask = await prisma.task.create({
+      data: {
+        title: value.title,
+        isCompleted: value.isCompleted,
+        userId: global.user_id,
+      },
+      select: {
+        id: true,
+        title: true,
+        isCompleted: true,
+      },
+    });
 
-    // Return the new task without exposing the internal user_id.
-    return res.status(201).json(result.rows[0]);
+    // Returns the new task without exposing the internal userId.
+    return res.status(201).json(newTask);
   } catch (err) {
     // Pass unexpected database errors to the global error handler.
     return next(err);
@@ -65,24 +67,30 @@ async function create(req, res, next) {
 async function index(_req, res, next) {
   try {
     // Select only tasks owned by the current user.
-    // Do not select the internal user_id column.
-    const result = await pool.query(
-      `SELECT id, title, is_completed
-       FROM tasks
-       WHERE user_id = $1
-       ORDER BY id`,
-      [global.user_id],
-    );
+    // Do not select the internal userId field.
+    const tasks = await prisma.task.findMany({
+      where: {
+        userId: global.user_id,
+      },
+      select: {
+        id: true,
+        title: true,
+        isCompleted: true,
+      },
+      orderBy: {
+        id: "asc",
+      },
+    });
 
     // The route exists, but this user currently has no task records.
-    if (result.rows.length === 0) {
+    if (tasks.length === 0) {
       return res.status(404).json({
         message: "No tasks found.",
       });
     }
 
     // Return only this user's tasks.
-    return res.status(200).json(result.rows);
+    return res.status(200).json(tasks);
   } catch (err) {
     // Pass unexpected database errors to the global error handler.
     return next(err);
@@ -93,11 +101,7 @@ async function index(_req, res, next) {
 
 /**
  * Show function returns one task belonging to the currently logged-in user.
- *
- * @param {object} req - Express request object.
- * @param {object} res - Express response object.
- * @param {Function} next - Express function for passing unexpected errors.
- * @returns {Promise<object>} The Express response.
+ 
  */
 async function show(req, res, next) {
   // Express provides route parameters as strings.
@@ -113,23 +117,28 @@ async function show(req, res, next) {
   try {
     // Match both the task ID and its owner.
     // This prevents one user from viewing another user's task.
-    const result = await pool.query(
-      `SELECT id, title, is_completed
-       FROM tasks
-       WHERE id = $1 AND user_id = $2`,
-      [taskId, global.user_id],
-    );
+    const task = await prisma.task.findUnique({
+      where: {
+        id: taskId,
+        userId: global.user_id,
+      },
+      select: {
+        id: true,
+        title: true,
+        isCompleted: true,
+      },
+    });
 
-    // Return 404 when the task does not exist or belongs to another user.
+    // findUnique() returns null when no matching task is found.
     // The same response avoids revealing another user's private data.
-    if (result.rows.length === 0) {
+    if (!task) {
       return res.status(404).json({
         message: "Task not found.",
       });
     }
 
-    // Return the selected task without exposing user_id.
-    return res.status(200).json(result.rows[0]);
+    // Return the selected task without exposing userId.
+    return res.status(200).json(task);
   } catch (err) {
     // Pass unexpected database errors to the global error handler.
     return next(err);
@@ -137,14 +146,9 @@ async function show(req, res, next) {
 }
 
 /**
- * Update function changes one or more fields of a task belonging
- * to the currently logged-in user.
+ * Update function changes one or more fields of a task belonging to the currently logged-in user.
  * Uses the route: PATCH /api/tasks/:id
- *
- * @param {object} req - Express request object.
- * @param {object} res - Express response object.
- * @param {Function} next - Express function for passing unexpected errors.
- * @returns {Promise<object>} The Express response.
+
  */
 async function update(req, res, next) {
   // Joi expects an object, so use an empty object if no body was sent.
@@ -175,46 +179,32 @@ async function update(req, res, next) {
   }
 
   try {
-    // Get the validated JavaScript field names.
-    let keys = Object.keys(taskChange);
-
-    // Convert camelCase JavaScript names to snake_case database names.
-    keys = keys.map((key) =>
-      key === "isCompleted" ? "is_completed" : key,
-    );
-
-    // Build a parameterized SET clause.
-    // Example: "title = $1, is_completed = $2"
-    const setClauses = keys
-      .map((key, index) => `${key} = $${index + 1}`)
-      .join(", ");
-
-    // The task ID comes after all updated field values.
-    const idParameter = `$${keys.length + 1}`;
-
-    // The user ID is the final parameter.
-    const userParameter = `$${keys.length + 2}`;
-
     // Update only a task matching both the ID and its owner.
-    const result = await pool.query(
-      `UPDATE tasks
-       SET ${setClauses}
-       WHERE id = ${idParameter} AND user_id = ${userParameter}
-       RETURNING id, title, is_completed`,
-      [...Object.values(taskChange), taskId, global.user_id],
-    );
+    // Prisma accepts the validated camelCase fields directly.
+    const updatedTask = await prisma.task.update({
+      where: {
+        id: taskId,
+        userId: global.user_id,
+      },
+      data: taskChange,
+      select: {
+        id: true,
+        title: true,
+        isCompleted: true,
+      },
+    });
 
-    // Return 404 if the task does not exist or belongs to another user.
-    if (result.rows.length === 0) {
+    // Return the updated task without exposing userId.
+    return res.status(200).json(updatedTask);
+  } catch (err) {
+    // Prisma error P2025 means no matching owned task was found.
+    if (err.code === "P2025") {
       return res.status(404).json({
         message: "Task not found.",
       });
     }
 
-    // Return the updated task without exposing user_id.
-    return res.status(200).json(result.rows[0]);
-  } catch (err) {
-    // Pass unexpected database errors to the global error handler.
+    // Unexpected database errors passed to the global error handler.
     return next(err);
   }
 }
@@ -222,11 +212,6 @@ async function update(req, res, next) {
 /**
  * DeleteTask function removes a task belonging to the currently logged-in user.
  * Uses the route: DELETE /api/tasks/:id
- *
- * @param {object} req - Express request object.
- * @param {object} res - Express response object.
- * @param {Function} next - Express function for passing unexpected errors.
- * @returns {Promise<object>} The Express response.
  */
 async function deleteTask(req, res, next) {
   // Express provides route parameters as strings.
@@ -241,25 +226,30 @@ async function deleteTask(req, res, next) {
 
   try {
     // Delete only a task matching both the ID and its owner.
-    // RETURNING provides the deleted task for the response.
-    const result = await pool.query(
-      `DELETE FROM tasks
-       WHERE id = $1 AND user_id = $2
-       RETURNING id, title, is_completed`,
-      [taskId, global.user_id],
-    );
+    // Prisma returns the deleted task for the response.
+    const deletedTask = await prisma.task.delete({
+      where: {
+        id: taskId,
+        userId: global.user_id,
+      },
+      select: {
+        id: true,
+        title: true,
+        isCompleted: true,
+      },
+    });
 
-    // Return 404 if no matching owned task was deleted.
-    if (result.rows.length === 0) {
+    // Without exposing userId, return the deleted task.
+    return res.status(200).json(deletedTask);
+  } catch (err) {
+    // Prisma error P2025 means no matching owned task was found.
+    if (err.code === "P2025") {
       return res.status(404).json({
         message: "Task not found.",
       });
     }
 
-    // Return the deleted task without exposing user_id.
-    return res.status(200).json(result.rows[0]);
-  } catch (err) {
-    // Pass unexpected database errors to the global error handler.
+    // Unexpected database errors passed to the global error handler.
     return next(err);
   }
 }

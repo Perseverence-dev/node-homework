@@ -9,8 +9,8 @@ const util = require("util");
 // Import the Joi schema used to validate registration data.
 const { userSchema } = require("../validation/userSchema");
 
-// Import the PostgreSQL connection pool.
-const pool = require("../db/pg-pool");
+// Import the shared Prisma Client.
+const prisma = require("../db/prisma");
 
 // Convert crypto.scrypt() into a Promise-based function
 // so it can be used with async and await.
@@ -93,31 +93,38 @@ async function register(req, res, next) {
   const hashedPassword = await hashPassword(password);
 
   try {
-    // Insert the new user using parameter placeholders.
-    // RETURNING sends back only the safe columns needed by the application.
-    const result = await pool.query(
-      `INSERT INTO users (email, name, hashed_password)
-       VALUES ($1, $2, $3)
-       RETURNING id, email, name`,
-      [email, name, hashedPassword],
-    );
+    // Create the user with Prisma.
+    // select returns only the safe fields needed by the application.
 
-    // PostgreSQL returns inserted rows inside result.rows.
-    const newUser = result.rows[0];
+    const newUser = await prisma.user.create({
+      data: {
+        email,
+        name,
+        hashedPassword,
+      },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+      },
+    });
 
     // Temporarily store the new user's numeric database ID.
     global.user_id = newUser.id;
 
     // Return only public user information.
-    // Do not return id, password, or hashed_password.
+    // Do not return id, password, or hashedPassword.
     return res.status(201).json({
       name: newUser.name,
       email: newUser.email,
     });
   } catch (err) {
-    // PostgreSQL error 23505 means a UNIQUE constraint was violated.
+    // Prisma error P2002 means a UNIQUE constraint was violated.
     // In this case, the submitted email already exists.
-    if (err.code === "23505") {
+    if (
+      err.name === "PrismaClientKnownRequestError" &&
+      err.code === "P2002"
+    ) {
       return res.status(400).json({
         message: "Email is already registered.",
       });
@@ -141,24 +148,26 @@ async function logon(req, res, next) {
   // The password is used only for comparison and is not stored.
   const { email, password } = req.body || {};
 
-  try {
-    // Find a user with the submitted email.
-    // $1 is a parameter placeholder that prevents SQL injection.
-    const result = await pool.query(
-      "SELECT id, email, name, hashed_password FROM users WHERE email = $1",
-      [email],
-    );
+  // Normalize a submitted string email before searching.
+  // Registration already lowercases email through the Joi schema.
+  const normalizedEmail =
+    typeof email === "string" ? email.toLowerCase() : email;
 
-    // result.rows is empty when no matching user exists.
-    const matchingUser = result.rows[0];
+  try {
+    // Find the user through the unique email column.
+    const matchingUser = await prisma.user.findUnique({
+      where: {
+        email: normalizedEmail,
+      },
+    });
 
     // Compare the submitted password with the stored hash.
     // Short-circuit evaluation prevents comparePassword()
-    // from running when no user was found.
+    // from running when no user or password was provided.
     const goodCredentials =
       matchingUser &&
       password &&
-      (await comparePassword(password, matchingUser.hashed_password));
+      (await comparePassword(password, matchingUser.hashedPassword));
 
     // Return the same generic response whether the email
     // or password was incorrect.

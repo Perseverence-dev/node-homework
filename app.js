@@ -1,7 +1,7 @@
 const express = require("express");
 
-// Import the PostgreSQL connection pool.
-const pool = require("./db/pg-pool");
+// Import the shared Prisma Client.
+const prisma = require("./db/prisma");
 
 const userRoutes = require("./routes/userRoutes");
 const notFound = require("./middleware/not-found");
@@ -24,7 +24,8 @@ app.use(express.json());
 // Confirm that both the Express server and PostgreSQL are available.
 app.get("/health", async (_req, res) => {
   try {
-    await pool.query("SELECT 1");
+    // Use Prisma to send a simple query to PostgreSQL.
+    await prisma.$queryRaw`SELECT 1`;
 
     return res.status(200).json({
       status: "ok",
@@ -32,7 +33,9 @@ app.get("/health", async (_req, res) => {
     });
   } catch (err) {
     return res.status(500).json({
-      message: `db not connected, error: ${err.message}`,
+      status: "error",
+      db: "not connected",
+      error: err.message,
     });
   }
 });
@@ -58,15 +61,16 @@ const server = app.listen(port, () => {
   console.log(`Server is listening on port ${port}...`);
 });
 
-// Gracefully stop accepting requests and close database connections.
+// Gracefully stop accepting requests and close the database connection.
 async function shutdown() {
   console.log("Shutting down the server...");
 
   try {
-    // Release every PostgreSQL connection held by the pool.
-    await pool.end();
+    // Disconnect the shared Prisma Client.
+    await prisma.$disconnect();
+    console.log("Prisma disconnected.");
 
-    // Stop the HTTP server after database connections are closed.
+    // Stop the HTTP server after the database connection is closed.
     server.close(() => {
       console.log("Server stopped.");
       process.exit(0);
