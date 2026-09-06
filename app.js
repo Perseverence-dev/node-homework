@@ -9,6 +9,7 @@ const errorHandler = require("./middleware/error-handler");
 
 const authMiddleware = require("./middleware/auth");
 const taskRouter = require("./routes/taskRoutes");
+const analyticsRoutes = require("./routes/analyticsRoutes");
 
 // Create the Express application.
 const app = express();
@@ -46,6 +47,9 @@ app.use("/api/users", userRoutes);
 
 // Mount the task router with authentication middleware.
 app.use("/api/tasks", authMiddleware, taskRouter);
+// Analytics router mounted with authentication middleware.
+// This produces endpoints beginning with /api/analytics.
+app.use("/api/analytics", authMiddleware, analyticsRoutes);
 
 // Handle requests that did not match any route.
 // This must appear after all real routes.

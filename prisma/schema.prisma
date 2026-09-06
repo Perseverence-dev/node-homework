@@ -15,7 +15,7 @@ model User {
   name           String   @db.VarChar(30)
   hashedPassword String   @map("hashed_password") @db.VarChar(255)
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamp(6)
-  tasks          Task[]
+  Task           Task[]
 
   @@map("users")
 }
@@ -24,9 +24,10 @@ model Task {
   id          Int      @id @default(autoincrement())
   title       String   @db.VarChar(255)
   isCompleted Boolean  @default(false) @map("is_completed")
+  priority    String   @default("medium") @db.VarChar(10)
   userId      Int      @map("user_id")
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamp(6)
-  user        User     @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  User        User     @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
 
   @@unique([id, userId], map: "task_id_user_id_unique")
   @@map("tasks")

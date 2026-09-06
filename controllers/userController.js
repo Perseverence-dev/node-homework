@@ -56,23 +56,16 @@ async function comparePassword(inputPassword, storedHash) {
 }
 
 /**
- * Register a new user.
- *
- * @param {object} req - Express request object.
- * @param {object} res - Express response object.
- * @param {Function} next - Express function for passing unexpected errors.
- * @returns {Promise<object>} The Express response.
+ * Register a new user and create three welcome tasks in one transaction.
  */
 async function register(req, res, next) {
-  // Joi expects an object. If no request body was sent,
-  // use an empty object so validation can return a 400 response.
+  // Joi expects an object. If no request body was sent, use an empty object so validation can return a 400 response.
   if (!req.body) {
     req.body = {};
   }
 
   // Validate and clean the submitted registration data.
-  // abortEarly: false reports all validation problems
-  // instead of stopping after the first problem.
+  // abortEarly: false reports all validation problems instead of stopping after the first problem.
   const { error, value } = userSchema.validate(req.body, {
     abortEarly: false,
   });
@@ -93,30 +86,81 @@ async function register(req, res, next) {
   const hashedPassword = await hashPassword(password);
 
   try {
-    // Create the user with Prisma.
-    // select returns only the safe fields needed by the application.
+    // Run user and welcome-task creation as one atomic operation.
+    // If any operation fails, Prisma rolls back the entire transaction.
+    const result = await prisma.$transaction(async (tx) => {
+      // Create the user through the transaction client.
+      // select returns only safe fields needed by the application.
+      const newUser = await tx.user.create({
+        data: {
+          email,
+          name,
+          hashedPassword,
+        },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          createdAt: true,
+        },
+      });
 
-    const newUser = await prisma.user.create({
-      data: {
-        email,
-        name,
-        hashedPassword,
-      },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-      },
+      // Prepare the three required welcome tasks.
+      const welcomeTaskData = [
+        {
+          title: "Complete your profile",
+          priority: "medium",
+          userId: newUser.id,
+        },
+        {
+          title: "Add your first task",
+          priority: "high",
+          userId: newUser.id,
+        },
+        {
+          title: "Explore the app",
+          priority: "low",
+          userId: newUser.id,
+        },
+      ];
+
+      // Insert all three welcome tasks with one database operation.
+      await tx.task.createMany({
+        data: welcomeTaskData,
+      });
+
+      // Retrieve the created tasks because createMany returns only a count.
+      const welcomeTasks = await tx.task.findMany({
+        where: {
+          userId: newUser.id,
+          title: {
+            in: welcomeTaskData.map((task) => task.title),
+          },
+        },
+        select: {
+          id: true,
+          title: true,
+          isCompleted: true,
+          userId: true,
+          priority: true,
+        },
+      });
+
+      // Return the transaction results to the outer register function.
+      return {
+        user: newUser,
+        welcomeTasks,
+      };
     });
 
     // Temporarily store the new user's numeric database ID.
-    global.user_id = newUser.id;
+    global.user_id = result.user.id;
 
-    // Return only public user information.
-    // Do not return id, password, or hashedPassword.
+    // Return only public user information and the welcome tasks.
     return res.status(201).json({
-      name: newUser.name,
-      email: newUser.email,
+      user: result.user,
+      welcomeTasks: result.welcomeTasks,
+      transactionStatus: "success",
     });
   } catch (err) {
     // Prisma error P2002 means a UNIQUE constraint was violated.
@@ -154,12 +198,22 @@ async function logon(req, res, next) {
     typeof email === "string" ? email.toLowerCase() : email;
 
   try {
-    // Find the user through the unique email column.
-    const matchingUser = await prisma.user.findUnique({
-      where: {
-        email: normalizedEmail,
-      },
-    });
+
+   // Find the user through the unique email column.
+   // Select only the fields required to verify credentials and build the response.
+      const matchingUser = await prisma.user.findUnique({
+        where: {
+          email: normalizedEmail,
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+
+          // hashedPassword is required internally for password verification, never included in the API response.
+          hashedPassword: true,
+  },
+      });
 
     // Compare the submitted password with the stored hash.
     // Short-circuit evaluation prevents comparePassword()
