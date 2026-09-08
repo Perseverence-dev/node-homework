@@ -7,20 +7,43 @@ const userRoutes = require("./routes/userRoutes");
 const notFound = require("./middleware/not-found");
 const errorHandler = require("./middleware/error-handler");
 
-const authMiddleware = require("./middleware/auth");
+const jwtMiddleware = require("./middleware/jwtMiddleware");
 const taskRouter = require("./routes/taskRoutes");
 const analyticsRoutes = require("./routes/analyticsRoutes");
+
+// Security packages added in Assignment 8.
+const cookieParser = require("cookie-parser");
+const helmet = require("helmet");
+const { xss } = require("express-xss-sanitizer");
+const rateLimiter = require("express-rate-limit");
 
 // Create the Express application.
 const app = express();
 
-// Temporarily track the currently logged-in user's database ID.
-// Assignment 8 will replace this global approach with secure authentication.
-global.user_id = null;
+// Trust the hosting platform's proxy so secure cookies work in production.
+app.set("trust proxy", 1);
+
+// Rate limiting comes first so misbehaving clients are stopped early.
+app.use(
+  rateLimiter({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // limit each IP to 100 requests per windowMs
+  }),
+);
+
+// Helmet sets security-related HTTP headers.
+app.use(helmet());
+
+// Parse cookies so the JWT middleware can read the jwt cookie.
+app.use(cookieParser());
 
 // Parse incoming JSON request bodies.
 // This must appear before routes that read req.body.
 app.use(express.json());
+
+// Sanitize the request against XSS attacks.
+// This must come after the cookie and body parsers.
+app.use(xss());
 
 // Confirm that both the Express server and PostgreSQL are available.
 app.get("/health", async (_req, res) => {
@@ -45,11 +68,11 @@ app.get("/health", async (_req, res) => {
 // This produces endpoints beginning with /api/users.
 app.use("/api/users", userRoutes);
 
-// Mount the task router with authentication middleware.
-app.use("/api/tasks", authMiddleware, taskRouter);
-// Analytics router mounted with authentication middleware.
+// Mount the task router behind the JWT authentication middleware.
+app.use("/api/tasks", jwtMiddleware, taskRouter);
+// Analytics router mounted with the JWT authentication middleware.
 // This produces endpoints beginning with /api/analytics.
-app.use("/api/analytics", authMiddleware, analyticsRoutes);
+app.use("/api/analytics", jwtMiddleware, analyticsRoutes);
 
 // Handle requests that did not match any route.
 // This must appear after all real routes.

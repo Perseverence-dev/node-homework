@@ -6,6 +6,9 @@ const crypto = require("crypto");
 // from callback style to Promise style.
 const util = require("util");
 
+// Import jsonwebtoken to create the signed JWT for the cookie.
+const jwt = require("jsonwebtoken");
+
 // Import the Joi schema used to validate registration data.
 const { userSchema } = require("../validation/userSchema");
 
@@ -15,6 +18,26 @@ const prisma = require("../db/prisma");
 // Convert crypto.scrypt() into a Promise-based function
 // so it can be used with async and await.
 const scrypt = util.promisify(crypto.scrypt);
+
+// Cookie settings shared by logon, register, and logoff.
+// The secure flag is only turned on in production, where HTTPS is available.
+const cookieFlags = (req) => {
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "Strict",
+  };
+};
+
+// Create a signed JWT and store it in an HttpOnly cookie.
+// The JWT holds the user's id and a fresh CSRF token.
+// The CSRF token is returned so it can go in the response body.
+const setJwtCookie = (req, res, user) => {
+  const payload = { id: user.id, csrfToken: crypto.randomUUID() };
+  const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "1h" });
+  res.cookie("jwt", token, { ...cookieFlags(req), maxAge: 3600000 }); // 1 hour
+  return payload.csrfToken;
+};
 
 /**
  * Create a salted password hash.
@@ -153,11 +176,15 @@ async function register(req, res, next) {
       };
     });
 
-    // Temporarily store the new user's numeric database ID.
-    global.user_id = result.user.id;
+    // Start the session by setting the JWT cookie.
+    // The CSRF token goes back in the body so the client can send it in headers later.
+    const csrfToken = setJwtCookie(req, res, result.user);
 
     // Return only public user information and the welcome tasks.
     return res.status(201).json({
+      name: result.user.name,
+      email: result.user.email,
+      csrfToken,
       user: result.user,
       welcomeTasks: result.welcomeTasks,
       transactionStatus: "success",
@@ -231,13 +258,14 @@ async function logon(req, res, next) {
       });
     }
 
-    // Store the authenticated user's numeric database ID.
-    global.user_id = matchingUser.id;
+    // Start the session by setting the JWT cookie for this user.
+    const csrfToken = setJwtCookie(req, res, matchingUser);
 
-    // Return only safe, public information.
+    // Return only safe, public information plus the CSRF token.
     return res.status(200).json({
       name: matchingUser.name,
       email: matchingUser.email,
+      csrfToken,
     });
   } catch (err) {
     // Pass unexpected database errors to the global error handler.
@@ -248,13 +276,14 @@ async function logon(req, res, next) {
 /**
  * Handle a user logoff request.
  *
- * @param {object} _req - Express request object; not used here.
+ * @param {object} req - Express request object.
  * @param {object} res - Express response object.
  * @returns {object} The Express response.
  */
-function logoff(_req, res) {
-  // Clear the currently logged-in user.
-  global.user_id = null;
+function logoff(req, res) {
+  // End the session by clearing the JWT cookie.
+  // The same flags used when setting the cookie are needed to clear it.
+  res.clearCookie("jwt", cookieFlags(req));
 
   // Return a successful response.
   return res.status(200).json({

@@ -10,8 +10,8 @@ async function getUserAnalytics(req, res, next) {
 
   // The user ID must be a positive whole number.
   if (!Number.isInteger(userId) || userId <= 0) {
-  return res.status(400).json({
-    message: "The user ID passed is not valid.",
+    return res.status(400).json({
+      message: "The user ID passed is not valid.",
   });
   }
 

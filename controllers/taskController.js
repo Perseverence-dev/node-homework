@@ -39,7 +39,7 @@ async function create(req, res, next) {
         title: value.title,
         isCompleted: value.isCompleted,
         priority: value.priority,
-        userId: global.user_id,
+        userId: req.user.id,
       },
       select: {
         id: true,
@@ -93,7 +93,7 @@ async function bulkCreate(req, res, next) {
       title: value.title,
       isCompleted: value.isCompleted,
       priority: value.priority,
-      userId: global.user_id,
+      userId: req.user.id,
     });
   }
 
@@ -148,7 +148,7 @@ async function index(req, res, next) {
 
   // Select only tasks owned by the current user.
   const whereClause = {
-    userId: global.user_id,
+    userId: req.user.id,
   };
 
   // Read and clean the optional title search parameter.
@@ -240,7 +240,7 @@ async function show(req, res, next) {
     const task = await prisma.task.findUnique({
       where: {
         id: taskId,
-        userId: global.user_id,
+        userId: req.user.id,
       },
       select: {
         id: true,
@@ -314,7 +314,7 @@ async function update(req, res, next) {
     const updatedTask = await prisma.task.update({
       where: {
         id: taskId,
-        userId: global.user_id,
+        userId: req.user.id,
       },
       data: taskChange,
       select: {
@@ -361,7 +361,7 @@ async function deleteTask(req, res, next) {
     const deletedTask = await prisma.task.delete({
       where: {
         id: taskId,
-        userId: global.user_id,
+        userId: req.user.id,
       },
       select: {
         id: true,
