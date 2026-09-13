@@ -11,7 +11,6 @@ const prisma = require("../db/prisma");
 
 /**
  * Create a task for the currently logged-in user.
- *
  */
 async function create(req, res, next) {
   // Joi expects an object; if no body was sent, an empty object is used.
@@ -49,7 +48,7 @@ async function create(req, res, next) {
       },
     });
 
-    // Returns the new task without exposing the internal userId.
+    // Return the new task without exposing the internal userId.
     return res.status(201).json(newTask);
   } catch (err) {
     // Pass unexpected database errors to the global error handler.
@@ -129,14 +128,14 @@ async function index(req, res, next) {
   const limit =
     req.query.limit === undefined ? 10 : Number(req.query.limit);
 
-  
+  // Page must be a positive whole number.
   if (!Number.isInteger(page) || page < 1) {
     return res.status(400).json({
       message: "Page must be a positive integer.",
     });
   }
 
-  
+  // Limit must be a whole number within the allowed range.
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
     return res.status(400).json({
       message: "Limit must be an integer between 1 and 100.",
@@ -190,6 +189,13 @@ async function index(req, res, next) {
       },
     });
 
+    // Return 404 when this user has no tasks matching the request.
+    if (tasks.length === 0) {
+      return res.status(404).json({
+        message: "No tasks found.",
+      });
+    }
+
     // Count all tasks matching the same ownership and search filters.
     const totalTasks = await prisma.task.count({
       where: whereClause,
@@ -206,7 +212,6 @@ async function index(req, res, next) {
     };
 
     // Return this user's tasks and the pagination information.
-    // An empty task list is a successful result, so it returns status 200.
     return res.status(200).json({
       tasks,
       pagination,
@@ -217,11 +222,10 @@ async function index(req, res, next) {
   }
 }
 
-
 // Controller functions for reading, updating, and deleting tasks.
 
 /**
- * Show function returns one task belonging to the currently logged-in user. 
+ * Show function returns one task belonging to the currently logged-in user.
  */
 async function show(req, res, next) {
   // Express provides route parameters as strings.
@@ -276,9 +280,9 @@ async function show(req, res, next) {
 }
 
 /**
- * Update function changes one or more fields of a task belonging to the currently logged-in user.
+ * Update function changes one or more fields of a task belonging
+ * to the currently logged-in user.
  * Uses the route: PATCH /api/tasks/:id
-
  */
 async function update(req, res, next) {
   // Joi expects an object, so use an empty object if no body was sent.
@@ -335,7 +339,7 @@ async function update(req, res, next) {
       });
     }
 
-    // Unexpected database errors passed to the global error handler.
+    // Pass unexpected database errors to the global error handler.
     return next(err);
   }
 }
@@ -371,7 +375,7 @@ async function deleteTask(req, res, next) {
       },
     });
 
-    // Without exposing userId, return the deleted task.
+    // Return the deleted task without exposing userId.
     return res.status(200).json(deletedTask);
   } catch (err) {
     // Prisma error P2025 means no matching owned task was found.
@@ -381,7 +385,7 @@ async function deleteTask(req, res, next) {
       });
     }
 
-    // Unexpected database errors passed to the global error handler.
+    // Pass unexpected database errors to the global error handler.
     return next(err);
   }
 }

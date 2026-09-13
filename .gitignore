@@ -3,7 +3,6 @@
 # ===========================================
 node_modules/
 npm-debug.log*
-package-lock.json
 
 # ===========================================
 # Environment Variables
@@ -22,3 +21,9 @@ package-lock.json
 .DS_Store?
 
 /generated/prisma
+
+# ===========================================
+# Jest
+# ===========================================
+# Jest generates this folder when code coverage is calculated.
+coverage/
