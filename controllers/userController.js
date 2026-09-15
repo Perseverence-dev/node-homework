@@ -82,9 +82,63 @@ async function comparePassword(inputPassword, storedHash) {
  * Register a new user and create three welcome tasks in one transaction.
  */
 async function register(req, res, next) {
-  // Joi expects an object. If no request body was sent, use an empty object so validation can return a 400 response.
+  // Joi expects an object. If no request body was sent, use an empty object so validation can return a controlled response.
   if (!req.body) {
     req.body = {};
+  }
+
+  // Registration is public, so verify that it came from a person before doing password hashing or writing anything to the database.
+  let isPerson = false;
+
+  try {
+    if (req.body.recaptchaToken) {
+      // The browser receives this temporary token from Google's widget.
+      const token = req.body.recaptchaToken;
+      const params = new URLSearchParams();
+
+      params.append("secret", process.env.RECAPTCHA_SECRET);
+      params.append("response", token);
+      params.append("remoteip", req.ip);
+
+      // Ask Google whether the submitted reCAPTCHA token is genuine.
+      const response = await fetch(
+        "https://www.google.com/recaptcha/api/siteverify",
+        {
+          method: "POST",
+          body: params.toString(),
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+        },
+      );
+
+      const data = await response.json();
+
+      if (data.success) {
+        isPerson = true;
+      }
+
+      // recaptchaToken is not part of userSchema and must not be stored.
+      delete req.body.recaptchaToken;
+    } else if (
+      process.env.RECAPTCHA_BYPASS &&
+      req.get("X-Recaptcha-Test") === process.env.RECAPTCHA_BYPASS
+    ) {
+      // Jest and Postman cannot operate Google's browser widget.
+      // A private header gives those controlled tests an alternate path.
+      isPerson = true;
+    }
+  } catch (err) {
+    // Network and response-processing failures belong in the global error handler instead of being reported as validation failures.
+    return next(err);
+  }
+
+  // Stop registration if neither Google nor the test bypass verified it.
+  if (!isPerson) {
+    return res.status(400).json({
+      message:
+        "Bot verification failed. Please complete the reCAPTCHA.",
+    });
   }
 
   // Validate and clean the submitted registration data.
@@ -113,7 +167,7 @@ async function register(req, res, next) {
     // If any operation fails, Prisma rolls back the entire transaction.
     const result = await prisma.$transaction(async (tx) => {
       // Create the user through the transaction client.
-      // select returns only safe fields needed by the application.
+      // The select clause ensures only safe fields are returned to the application.
       const newUser = await tx.user.create({
         data: {
           email,
@@ -177,7 +231,8 @@ async function register(req, res, next) {
     });
 
     // Start the session by setting the JWT cookie.
-    // The CSRF token goes back in the body so the client can send it in headers later.
+    // The CSRF token goes back in the body so the client can send it
+    // in headers later.
     const csrfToken = setJwtCookie(req, res, result.user);
 
     // Return only public user information and the welcome tasks.
@@ -209,10 +264,10 @@ async function register(req, res, next) {
 /**
  * Handle a user logon request.
  *
- * @param {object} req - Express request object.
- * @param {object} res - Express response object.
- * @param {Function} next - Express function for passing unexpected errors.
- * @returns {Promise<object>} The Express response.
+ * req - Express request object.
+ * res - Express response object.
+ * next - Express function for passing unexpected errors.
+ * Promise<object - The Express response.
  */
 async function logon(req, res, next) {
   // Read the submitted credentials.
@@ -243,15 +298,13 @@ async function logon(req, res, next) {
       });
 
     // Compare the submitted password with the stored hash.
-    // Short-circuit evaluation prevents comparePassword()
-    // from running when no user or password was provided.
+    // Short-circuit evaluation prevents comparePassword() from running when no user or password was provided.
     const goodCredentials =
       matchingUser &&
       password &&
       (await comparePassword(password, matchingUser.hashedPassword));
 
-    // Return the same generic response whether the email
-    // or password was incorrect.
+    // Return the same generic response whether the email or password was incorrect.
     if (!goodCredentials) {
       return res.status(401).json({
         message: "Invalid email or password.",
@@ -276,9 +329,9 @@ async function logon(req, res, next) {
 /**
  * Handle a user logoff request.
  *
- * @param {object} req - Express request object.
- * @param {object} res - Express response object.
- * @returns {object} The Express response.
+ * req - Express request object.
+ * res - Express response object.
+ * returns - The Express response object.
  */
 function logoff(req, res) {
   // End the session by clearing the JWT cookie.

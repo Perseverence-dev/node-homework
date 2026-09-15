@@ -38,8 +38,9 @@ app.use(helmet());
 app.use(cookieParser());
 
 // Parse incoming JSON request bodies.
+// The larger limit allows registration requests to include a reCAPTCHA token.
 // This must appear before routes that read req.body.
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 // Sanitize the request against XSS attacks.
 // This must come after the cookie and body parsers.

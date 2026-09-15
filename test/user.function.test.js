@@ -59,8 +59,10 @@ afterAll(async () => {
 describe("register, authenticate, and log off a user", () => {
   it("46. creates the user entry", async () => {
     saveRes = await agent
-      .post("/api/users/register")
-      .send(testUser);
+    .post("/api/users/register")
+    // Jest cannot use the browser widget, so provide the private test bypass.
+    .set("X-Recaptcha-Test", process.env.RECAPTCHA_BYPASS)
+    .send(testUser);
 
     expect(saveRes.status).toBe(201);
   });
