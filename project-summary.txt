@@ -1,1 +1,29 @@
+Node Homework Final Project Week 11
+
+Deployed application:
 https://node-homework-ya.onrender.com
+
+Project overview:
+This project is a Node.js and Express REST API for managing user-owned tasks. Users can register, log on, create tasks, retrieve tasks, update task details, mark tasks complete, delete tasks, and log off.
+
+Database:
+The application uses PostgreSQL hosted on Neon. Prisma provides the data model, database queries, relationships, and migrations.
+
+Security:
+- Passwords are salted and hashed with Node.js crypto.scrypt.
+- Authentication uses signed JWTs stored in HttpOnly cookies.
+- CSRF tokens protect requests that change data.
+- Google reCAPTCHA protects user registration.
+- Helmet adds security-related HTTP headers.
+- Rate limiting reduces automated abuse.
+- Request data is sanitized to reduce XSS risks.
+- Task routes require authentication and enforce task ownership.
+
+Additional capabilities:
+- Tasks support priorities.
+- Task retrieval supports filtering, sorting, and pagination.
+- Analytics routes provide task-related summaries.
+
+Deployment:
+The PostgreSQL database is hosted on Neon, and the backend is deployed as a Render Web Service.
+                                                                                              
