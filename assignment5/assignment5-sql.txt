@@ -1,0 +1,21 @@
+# Assignment 5a — SQL Queries
+# Each non-comment line must contain one complete SQL statement.
+# Task 1: Find the total price of each of the first five orders.
+SELECT o.order_id, SUM(p.price * li.quantity) AS total_price FROM orders o JOIN line_items li ON o.order_id = li.order_id JOIN products p ON li.product_id = p.product_id GROUP BY o.order_id ORDER BY o.order_id LIMIT 5;
+# Task 2: Find each customer's average total order price.
+SELECT c.customer_name, AVG(t.total_price) AS average_order_price FROM customers c JOIN (SELECT o.customer_id, o.order_id, SUM(p.price * li.quantity) AS total_price FROM orders o JOIN line_items li ON o.order_id = li.order_id JOIN products p ON li.product_id = p.product_id GROUP BY o.customer_id, o.order_id) AS t ON c.customer_id = t.customer_id GROUP BY c.customer_id, c.customer_name ORDER BY c.customer_name;
+# Task 3a: Find the customer ID for Perez and Sons.
+SELECT customer_id FROM customers WHERE customer_name = 'Perez and Sons';
+# Task 3b: Find the employee ID for Miranda Harris.
+SELECT employee_id FROM employees WHERE first_name = 'Miranda' AND last_name = 'Harris';
+# Task 3c: Find the IDs of the five least expensive products.
+SELECT product_id FROM products ORDER BY price ASC, product_id ASC LIMIT 5;
+# Task 3d: Create the order and five line items in one transaction.
+BEGIN;
+INSERT INTO orders (customer_id, employee_id, date) VALUES (16, 7, '2026-08-22') RETURNING order_id;
+INSERT INTO line_items (order_id, product_id, quantity) VALUES (250, 23, 10), (250, 18, 10), (250, 43, 10), (250, 9, 10), (250, 44, 10);
+COMMIT;
+# Task 3e: Return all line items belonging to the newly created order.
+SELECT * FROM line_items WHERE order_id = 250;
+# Task 4: Find employees associated with more than five orders.
+SELECT e.first_name, e.last_name, COUNT(o.order_id) AS order_count FROM employees e JOIN orders o ON e.employee_id = o.employee_id GROUP BY e.employee_id, e.first_name, e.last_name HAVING COUNT(o.order_id) > 5 ORDER BY e.last_name;

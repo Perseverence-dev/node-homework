@@ -6,12 +6,38 @@ const crypto = require("crypto");
 // from callback style to Promise style.
 const util = require("util");
 
+// Import jsonwebtoken to create the signed JWT for the cookie.
+const jwt = require("jsonwebtoken");
+
 // Import the Joi schema used to validate registration data.
 const { userSchema } = require("../validation/userSchema");
+
+// Import the shared Prisma Client.
+const prisma = require("../db/prisma");
 
 // Convert crypto.scrypt() into a Promise-based function
 // so it can be used with async and await.
 const scrypt = util.promisify(crypto.scrypt);
+
+// Cookie settings shared by logon, register, and logoff.
+// The secure flag is only turned on in production, where HTTPS is available.
+const cookieFlags = (req) => {
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "Strict",
+  };
+};
+
+// Create a signed JWT and store it in an HttpOnly cookie.
+// The JWT holds the user's id and a fresh CSRF token.
+// The CSRF token is returned so it can go in the response body.
+const setJwtCookie = (req, res, user) => {
+  const payload = { id: user.id, csrfToken: crypto.randomUUID() };
+  const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "1h" });
+  res.cookie("jwt", token, { ...cookieFlags(req), maxAge: 3600000 }); // 1 hour
+  return payload.csrfToken;
+};
 
 /**
  * Create a salted password hash.
@@ -53,22 +79,70 @@ async function comparePassword(inputPassword, storedHash) {
 }
 
 /**
- * Register a new user.
- *
- * @param {object} req - Express request object.
- * @param {object} res - Express response object.
- * @returns {Promise<object>} The Express response.
+ * Register a new user and create three welcome tasks in one transaction.
  */
-async function register(req, res) {
-  // Joi expects an object. If no request body was sent,
-  // use an empty object so validation can return a 400 response.
+async function register(req, res, next) {
+  // Joi expects an object. If no request body was sent, use an empty object so validation can return a controlled response.
   if (!req.body) {
     req.body = {};
   }
 
+  // Registration is public, so verify that it came from a person before doing password hashing or writing anything to the database.
+  let isPerson = false;
+
+  try {
+    if (req.body.recaptchaToken) {
+      // The browser receives this temporary token from Google's widget.
+      const token = req.body.recaptchaToken;
+      const params = new URLSearchParams();
+
+      params.append("secret", process.env.RECAPTCHA_SECRET);
+      params.append("response", token);
+      params.append("remoteip", req.ip);
+
+      // Ask Google whether the submitted reCAPTCHA token is genuine.
+      const response = await fetch(
+        "https://www.google.com/recaptcha/api/siteverify",
+        {
+          method: "POST",
+          body: params.toString(),
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+        },
+      );
+
+      const data = await response.json();
+
+      if (data.success) {
+        isPerson = true;
+      }
+
+      // recaptchaToken is not part of userSchema and must not be stored.
+      delete req.body.recaptchaToken;
+    } else if (
+      process.env.RECAPTCHA_BYPASS &&
+      req.get("X-Recaptcha-Test") === process.env.RECAPTCHA_BYPASS
+    ) {
+      // Jest and Postman cannot operate Google's browser widget.
+      // A private header gives those controlled tests an alternate path.
+      isPerson = true;
+    }
+  } catch (err) {
+    // Network and response-processing failures belong in the global error handler instead of being reported as validation failures.
+    return next(err);
+  }
+
+  // Stop registration if neither Google nor the test bypass verified it.
+  if (!isPerson) {
+    return res.status(400).json({
+      message:
+        "Bot verification failed. Please complete the reCAPTCHA.",
+    });
+  }
+
   // Validate and clean the submitted registration data.
-  // abortEarly: false reports all validation problems
-  // instead of stopping after the first problem.
+  // abortEarly: false reports all validation problems instead of stopping after the first problem.
   const { error, value } = userSchema.validate(req.body, {
     abortEarly: false,
   });
@@ -76,7 +150,8 @@ async function register(req, res) {
   // Stop before hashing or storing anything if validation fails.
   if (error) {
     return res.status(400).json({
-      message: error.message,
+      message: "Validation failed",
+      details: error.details,
     });
   }
 
@@ -87,91 +162,181 @@ async function register(req, res) {
   // Hash the validated password before storing the user.
   const hashedPassword = await hashPassword(password);
 
-  // Store only the password hash.
-  // Never store the original plain-text password.
-  const newUser = {
-    name,
-    email,
-    hashedPassword,
-  };
+  try {
+    // Run user and welcome-task creation as one atomic operation.
+    // If any operation fails, Prisma rolls back the entire transaction.
+    const result = await prisma.$transaction(async (tx) => {
+      // Create the user through the transaction client.
+      // The select clause ensures only safe fields are returned to the application.
+      const newUser = await tx.user.create({
+        data: {
+          email,
+          name,
+          hashedPassword,
+        },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          createdAt: true,
+        },
+      });
 
-  // Add the user to the temporary in-memory users array.
-  global.users.push(newUser);
+      // Prepare the three required welcome tasks.
+      const welcomeTaskData = [
+        {
+          title: "Complete your profile",
+          priority: "medium",
+          userId: newUser.id,
+        },
+        {
+          title: "Add your first task",
+          priority: "high",
+          userId: newUser.id,
+        },
+        {
+          title: "Explore the app",
+          priority: "low",
+          userId: newUser.id,
+        },
+      ];
 
-  // Temporary debugging: display only safe user information.
-console.log(
-  "Registered users:",
-  global.users.map(({ name, email }) => ({ name, email })),
-);
+      // Insert all three welcome tasks with one database operation.
+      await tx.task.createMany({
+        data: welcomeTaskData,
+      });
 
-// Treat the newly registered user as the currently logged-in user.
-global.user_id = newUser;
+      // Retrieve the created tasks because createMany returns only a count.
+      const welcomeTasks = await tx.task.findMany({
+        where: {
+          userId: newUser.id,
+          title: {
+            in: welcomeTaskData.map((task) => task.title),
+          },
+        },
+        select: {
+          id: true,
+          title: true,
+          isCompleted: true,
+          userId: true,
+          priority: true,
+        },
+      });
 
-  // Treat the newly registered user as the logged-in user.
-  global.user_id = newUser;
+      // Return the transaction results to the outer register function.
+      return {
+        user: newUser,
+        welcomeTasks,
+      };
+    });
 
-  // Return only public user information.
-  // Do not return password or hashedPassword.
-  return res.status(201).json({
-    name: newUser.name,
-    email: newUser.email,
-  });
+    // Start the session by setting the JWT cookie.
+    // The CSRF token goes back in the body so the client can send it
+    // in headers later.
+    const csrfToken = setJwtCookie(req, res, result.user);
+
+    // Return only public user information and the welcome tasks.
+    return res.status(201).json({
+      name: result.user.name,
+      email: result.user.email,
+      csrfToken,
+      user: result.user,
+      welcomeTasks: result.welcomeTasks,
+      transactionStatus: "success",
+    });
+  } catch (err) {
+    // Prisma error P2002 means a UNIQUE constraint was violated.
+    // In this case, the submitted email already exists.
+    if (
+      err.name === "PrismaClientKnownRequestError" &&
+      err.code === "P2002"
+    ) {
+      return res.status(400).json({
+        message: "Email is already registered.",
+      });
+    }
+
+    // Pass all unexpected database errors to the global error handler.
+    return next(err);
+  }
 }
 
 /**
  * Handle a user logon request.
  *
- * @param {object} req - Express request object.
- * @param {object} res - Express response object.
- * @returns {Promise<object>} The Express response.
+ * req - Express request object.
+ * res - Express response object.
+ * next - Express function for passing unexpected errors.
+ * Promise<object - The Express response.
  */
-async function logon(req, res) {
+async function logon(req, res, next) {
   // Read the submitted credentials.
   // The password is used only for comparison and is not stored.
   const { email, password } = req.body || {};
 
-  // Find the user by email only.
-  // We can no longer compare the submitted password directly
-  // because the original password is not stored.
-  const matchingUser = global.users.find(
-    (user) => user.email === email,
-  );
+  // Normalize a submitted string email before searching.
+  // Registration already lowercases email through the Joi schema.
+  const normalizedEmail =
+    typeof email === "string" ? email.toLowerCase() : email;
 
-  // Compare the submitted password with the stored hash.
-  // Short-circuit evaluation prevents comparePassword()
-  // from running when no user was found.
-  const goodCredentials =
-    matchingUser &&
-    (await comparePassword(password, matchingUser.hashedPassword));
+  try {
 
-  // Return the same generic response whether the email
-  // or password was incorrect.
-  if (!goodCredentials) {
-    return res.status(401).json({
-      message: "Invalid email or password.",
+   // Find the user through the unique email column.
+   // Select only the fields required to verify credentials and build the response.
+      const matchingUser = await prisma.user.findUnique({
+        where: {
+          email: normalizedEmail,
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+
+          // hashedPassword is required internally for password verification, never included in the API response.
+          hashedPassword: true,
+  },
+      });
+
+    // Compare the submitted password with the stored hash.
+    // Short-circuit evaluation prevents comparePassword() from running when no user or password was provided.
+    const goodCredentials =
+      matchingUser &&
+      password &&
+      (await comparePassword(password, matchingUser.hashedPassword));
+
+    // Return the same generic response whether the email or password was incorrect.
+    if (!goodCredentials) {
+      return res.status(401).json({
+        message: "Invalid email or password.",
+      });
+    }
+
+    // Start the session by setting the JWT cookie for this user.
+    const csrfToken = setJwtCookie(req, res, matchingUser);
+
+    // Return only safe, public information plus the CSRF token.
+    return res.status(200).json({
+      name: matchingUser.name,
+      email: matchingUser.email,
+      csrfToken,
     });
+  } catch (err) {
+    // Pass unexpected database errors to the global error handler.
+    return next(err);
   }
-
-  // Store the authenticated user as the logged-in user.
-  global.user_id = matchingUser;
-
-  // Return only safe, public information.
-  return res.status(200).json({
-    name: matchingUser.name,
-    email: matchingUser.email,
-  });
 }
 
 /**
  * Handle a user logoff request.
  *
- * @param {object} _req - Express request object; not used here.
- * @param {object} res - Express response object.
- * @returns {object} The Express response.
+ * req - Express request object.
+ * res - Express response object.
+ * returns - The Express response object.
  */
-function logoff(_req, res) {
-  // Clear the currently logged-in user.
-  global.user_id = null;
+function logoff(req, res) {
+  // End the session by clearing the JWT cookie.
+  // The same flags used when setting the cookie are needed to clear it.
+  res.clearCookie("jwt", cookieFlags(req));
 
   // Return a successful response.
   return res.status(200).json({

@@ -8,13 +8,19 @@ const {
   logoff,
 } = require("../controllers/userController");
 
+// Import the JWT middleware so logoff is protected.
+const jwtMiddleware = require("../middleware/jwtMiddleware");
+
 // Create a router for user-related endpoints.
 const router = express.Router();
 
-// Connect each POST endpoint to its controller function.
+// Registration and logon remain public because they establish a session.
 router.post("/register", register);
 router.post("/logon", logon);
-router.post("/logoff", logoff);
+
+// Logoff is protected so it cannot be triggered by cross-site request forgery.
+// Logoff requires a valid JWT and matching CSRF token.
+router.post("/logoff", jwtMiddleware, logoff);
 
 // Export the router so it can be mounted in app.js.
 module.exports = router;

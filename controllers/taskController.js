@@ -4,98 +4,222 @@ const {
   patchTaskSchema,
 } = require("../validation/taskSchema");
 
-/**
- * Generate sequential IDs for new tasks.
-**/
-//Javascript closure
-    //The outer function runs once 
-    const taskCounter = (() => {
-    //Private counter
-    let lastTaskNumber = 0;
+// Import the shared Prisma Client.
+const prisma = require("../db/prisma");
 
-    // Inner function runs every time a new task is created
-    return () => {
-        lastTaskNumber += 1;
-        return lastTaskNumber;
-    };
-    })(); //() -> Immediately invoked function expression (IIFE) to create a private scope for the counter
+// JSDoc comments below
 
-//Remove UserId from the task object before sending it to the client. This prevents exposing sensitive information about task ownership.
-function sanitizeTask(task) {
-  // Object destructuring  
-  // const { propertyToExclude, ...remainingProperties } = originalObject;
-  const { userId, ...sanitizedTask } = task;
-
-  return sanitizedTask;
-}
-
-//JSDoc comments below
 /**
  * Create a task for the currently logged-in user.
- *
- * @param {object} req - Express request object.
- * @param {object} res - Express response object.
- * @returns {object} The Express response.
  */
-
-function create(req, res) {
-  // Joi expects an object, if no body was sent, empty object is used.
+async function create(req, res, next) {
+  // Joi expects an object; if no body was sent, an empty object is used.
   if (!req.body) {
     req.body = {};
   }
 
-  // Validate and clean the submitted task information - Joi Schema is used.
+  // Validate and clean the submitted task information using Joi.
   const { error, value } = taskSchema.validate(req.body, {
     abortEarly: false,
   });
 
-  // If validation fails,task is not stored and a 400 response is returned
+  // If validation fails, the task is not stored and a 400 response is returned.
   if (error) {
     return res.status(400).json({
       message: error.message,
     });
   }
 
-  const newTask = {
-    // Generate a unique sequential ID.
-    id: taskCounter(),
+  try {
+    // Create the validated task and associate it with the logged-in user.
+    // PostgreSQL generates the task ID automatically.
+    const newTask = await prisma.task.create({
+      data: {
+        title: value.title,
+        isCompleted: value.isCompleted,
+        priority: value.priority,
+        userId: req.user.id,
+      },
+      select: {
+        id: true,
+        title: true,
+        isCompleted: true,
+        priority: true,
+      },
+    });
 
-    // Ownership is stored as the authenticated user's email.
-    userId: global.user_id.email,
+    // Return the new task without exposing the internal userId.
+    return res.status(201).json(newTask);
+  } catch (err) {
+    // Pass unexpected database errors to the global error handler.
+    return next(err);
+  }
+}
 
-    // Add the validated Joi schema - title and isCompleted values.
-    ...value,
-  };
+/**
+ * Create multiple tasks for the currently logged-in user.
+ */
+async function bulkCreate(req, res, next) {
+  // Read the tasks array from the request body.
+  const { tasks } = req.body || {};
 
-  // Save the complete task, including userId, in memory.
-  global.tasks.push(newTask);
+  // The request must contain a non-empty tasks array.
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    return res.status(400).json({
+      message: "Invalid request data. Expected a non-empty array of tasks.",
+    });
+  }
 
-  // response sent without exposing userId in the API response.
-  return res.status(201).json(sanitizeTask(newTask));
+  // Store validated tasks here before inserting anything.
+  const validTasks = [];
+
+  // Validate every submitted task using the existing creation schema.
+  for (const task of tasks) {
+    const { error, value } = taskSchema.validate(task, {
+      abortEarly: false,
+    });
+
+    // Stop before any database insertion if one task is invalid.
+    if (error) {
+      return res.status(400).json({
+        message: "Validation failed",
+        details: error.details,
+      });
+    }
+
+    // Add the authenticated user's ID to each validated task.
+    validTasks.push({
+      title: value.title,
+      isCompleted: value.isCompleted,
+      priority: value.priority,
+      userId: req.user.id,
+    });
+  }
+
+  try {
+    // Insert all validated tasks in one database operation.
+    const result = await prisma.task.createMany({
+      data: validTasks,
+      skipDuplicates: false,
+    });
+
+    // createMany returns the number of records created.
+    return res.status(201).json({
+      message: "Bulk task creation successful",
+      tasksCreated: result.count,
+      totalRequested: validTasks.length,
+    });
+  } catch (err) {
+    // Pass unexpected database errors to the global error handler.
+    return next(err);
+  }
 }
 
 /**
  * Index function handles this route: GET /api/tasks
- * Return all tasks belonging to the currently logged-in user.
- * _req - Express request not needed here.
+ * Return one page of tasks belonging to the currently logged-in user.
+ * Eagerly load safe information about the user who owns each task.
+ * Support case-insensitive title search and pagination.
  */
-function index(_req, res) {
-  // Only select tasks owned by the current user.
-  const userTasks = global.tasks.filter(
-    (task) => task.userId === global.user_id.email,
-  );
+async function index(req, res, next) {
+  // Use default pagination values when page and limit are not provided.
+  const page =
+    req.query.page === undefined ? 1 : Number(req.query.page);
+  const limit =
+    req.query.limit === undefined ? 10 : Number(req.query.limit);
 
-  // The route exists, but this user currently has no task records.
-  if (userTasks.length === 0) {
-    return res.status(404).json({
-      message: "No tasks found.",
+  // Page must be a positive whole number.
+  if (!Number.isInteger(page) || page < 1) {
+    return res.status(400).json({
+      message: "Page must be a positive integer.",
     });
   }
 
-  // Safe response array without exposing task ownership.
-  const sanitizedTasks = userTasks.map((task) => sanitizeTask(task));
+  // Limit must be a whole number within the allowed range.
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    return res.status(400).json({
+      message: "Limit must be an integer between 1 and 100.",
+    });
+  }
 
-  return res.status(200).json(sanitizedTasks);
+  // Calculate how many matching tasks Prisma should skip.
+  const skip = (page - 1) * limit;
+
+  // Select only tasks owned by the current user.
+  const whereClause = {
+    userId: req.user.id,
+  };
+
+  // Read and clean the optional title search parameter.
+  const searchTerm =
+    typeof req.query.find === "string" ? req.query.find.trim() : "";
+
+  // Add a case-insensitive title filter when find is provided.
+  if (searchTerm) {
+    whereClause.title = {
+      contains: searchTerm,
+      mode: "insensitive",
+    };
+  }
+
+  try {
+    // Retrieve one page of tasks owned by the current user.
+    // Do not select the internal userId field.
+    const tasks = await prisma.task.findMany({
+      where: whereClause,
+      select: {
+        id: true,
+        title: true,
+        isCompleted: true,
+        priority: true,
+        createdAt: true,
+
+        // Eagerly load only safe public information about the task owner.
+        User: {
+          select: {
+            name: true,
+            email: true,
+          },
+        },
+      },
+      skip,
+      take: limit,
+      orderBy: {
+        createdAt: "desc",
+      },
+    });
+
+    // Return 404 when this user has no tasks matching the request.
+    if (tasks.length === 0) {
+      return res.status(404).json({
+        message: "No tasks found.",
+      });
+    }
+
+    // Count all tasks matching the same ownership and search filters.
+    const totalTasks = await prisma.task.count({
+      where: whereClause,
+    });
+
+    // Build pagination information for the API client.
+    const pagination = {
+      page,
+      limit,
+      total: totalTasks,
+      pages: Math.ceil(totalTasks / limit),
+      hasNext: page * limit < totalTasks,
+      hasPrev: page > 1,
+    };
+
+    // Return this user's tasks and the pagination information.
+    return res.status(200).json({
+      tasks,
+      pagination,
+    });
+  } catch (err) {
+    // Pass unexpected database errors to the global error handler.
+    return next(err);
+  }
 }
 
 // Controller functions for reading, updating, and deleting tasks.
@@ -103,136 +227,173 @@ function index(_req, res) {
 /**
  * Show function returns one task belonging to the currently logged-in user.
  */
-function show(req, res) {
-  // Parse Express provided string parameter into a number, since taskIds are numbers.
-  const taskId = parseInt(req.params?.id, 10);
+async function show(req, res, next) {
+  // Express provides route parameters as strings.
+  const taskId = Number(req.params?.id);
 
-  // If task ID is missing or invalid, return a 400 error.
-  if (!taskId) {
+  // A task ID must be a positive integer.
+  if (!Number.isInteger(taskId) || taskId <= 0) {
     return res.status(400).json({
       message: "The task ID passed is not valid.",
     });
   }
 
-  // Match both the task ID and its owner.
-  // Prevents a logged-in user from viewing another user's task.
-  const task = global.tasks.find(
-    (storedTask) =>
-      storedTask.id === taskId &&
-      storedTask.userId === global.user_id.email,
-  );
+  try {
+    // Match both the task ID and its owner.
+    // This prevents one user from viewing another user's task.
+    const task = await prisma.task.findUnique({
+      where: {
+        id: taskId,
+        userId: req.user.id,
+      },
+      select: {
+        id: true,
+        title: true,
+        isCompleted: true,
+        priority: true,
+        createdAt: true,
 
-  // Return 404 when the task does not exist or belongs to another user.
-  // Using the same response for both cases avoids revealing private data.
-  if (!task) {
-    return res.status(404).json({
-      message: "Task not found.",
+        // Eagerly load only safe public information about the task owner.
+        User: {
+          select: {
+            name: true,
+            email: true,
+          },
+        },
+      },
     });
-  }
 
-  // Response status 200 with the task data without userId.
-  return res.status(200).json(sanitizeTask(task));
+    // findUnique() returns null when no matching task is found.
+    // The same response avoids revealing another user's private data.
+    if (!task) {
+      return res.status(404).json({
+        message: "Task not found.",
+      });
+    }
+
+    // Return the selected task without exposing userId.
+    return res.status(200).json(task);
+  } catch (err) {
+    // Pass unexpected database errors to the global error handler.
+    return next(err);
+  }
 }
 
 /**
- * Update function changes one or more fields of a task belonging to the currently logged-in user.
- * Uses the route : PATCH /api/tasks/:id
+ * Update function changes one or more fields of a task belonging
+ * to the currently logged-in user.
+ * Uses the route: PATCH /api/tasks/:id
  */
-function update(req, res) {
+async function update(req, res, next) {
   // Joi expects an object, so use an empty object if no body was sent.
   if (!req.body) {
     req.body = {};
   }
 
-  // Validate the requested changes before finding or modifying the task.
-  const { error, value } = patchTaskSchema.validate(req.body, {
+  // Validate the requested changes before modifying the task.
+  const { error, value: taskChange } = patchTaskSchema.validate(req.body, {
     abortEarly: false,
   });
 
-  //If validation fails, stop before modifying stored data.
+  // If validation fails, stop before modifying stored data.
   if (error) {
     return res.status(400).json({
       message: error.message,
     });
   }
 
-  // Express provides route parameters as strings, but task IDs are numbers.
-  const taskId = parseInt(req.params?.id, 10);
+  // Express provides route parameters as strings.
+  const taskId = Number(req.params?.id);
 
-  // Stop the request if the provided task ID is missing or invalid.
-  if (!taskId) {
+  // A task ID must be a positive integer.
+  if (!Number.isInteger(taskId) || taskId <= 0) {
     return res.status(400).json({
       message: "The task ID passed is not valid.",
     });
   }
 
-  // Match both the requested task ID and its owner.
-  // This prevents a user from updating another user's task.
-  //find() returns the first matching element, in the global.tasks array.
-  const task = global.tasks.find(
-    (storedTask) =>
-      storedTask.id === taskId &&
-      storedTask.userId === global.user_id.email,
-  );
-
-  // Return 404 when the task does not exist or belongs to another user.
-  if (!task) {
-    return res.status(404).json({
-      message: "Task not found.",
+  try {
+    // Update only a task matching both the ID and its owner.
+    // Prisma accepts the validated camelCase fields directly.
+    const updatedTask = await prisma.task.update({
+      where: {
+        id: taskId,
+        userId: req.user.id,
+      },
+      data: taskChange,
+      select: {
+        id: true,
+        title: true,
+        isCompleted: true,
+        priority: true,
+      },
     });
+
+    // Return the updated task without exposing userId.
+    return res.status(200).json(updatedTask);
+  } catch (err) {
+    // Prisma error P2025 means no matching owned task was found.
+    if (err.code === "P2025") {
+      return res.status(404).json({
+        message: "Task not found.",
+      });
+    }
+
+    // Pass unexpected database errors to the global error handler.
+    return next(err);
   }
-
-  // Copy only the validated Joi fields onto the existing stored task.
-  // Fields not included in the request remain unchanged.
-  Object.assign(task, value);
-
-  // Return the updated task without exposing its internal userId.
-  return res.status(200).json(sanitizeTask(task));
 }
 
 /**
  * DeleteTask function removes a task belonging to the currently logged-in user.
- * Uses the route : DELETE /api/tasks/:id
+ * Uses the route: DELETE /api/tasks/:id
  */
-function deleteTask(req, res) {
-  
-  const taskId = parseInt(req.params?.id, 10);
+async function deleteTask(req, res, next) {
+  // Express provides route parameters as strings.
+  const taskId = Number(req.params?.id);
 
-  if (!taskId) {
+  // A task ID must be a positive integer.
+  if (!Number.isInteger(taskId) || taskId <= 0) {
     return res.status(400).json({
       message: "The task ID passed is not valid.",
     });
   }
 
-  // Find the array position of a task that matches both the ID and owner.
-  // findIndex() is used to search the array
-
-  const taskIndex = global.tasks.findIndex(
-    (storedTask) =>
-      storedTask.id === taskId &&
-      storedTask.userId === global.user_id.email,
-  );
-
-  // findIndex() returns -1 when no matching owned task is found.
-  if (taskIndex === -1) {
-    return res.status(404).json({
-      message: "Task not found.",
+  try {
+    // Delete only a task matching both the ID and its owner.
+    // Prisma returns the deleted task for the response.
+    const deletedTask = await prisma.task.delete({
+      where: {
+        id: taskId,
+        userId: req.user.id,
+      },
+      select: {
+        id: true,
+        title: true,
+        isCompleted: true,
+        priority: true,
+      },
     });
+
+    // Return the deleted task without exposing userId.
+    return res.status(200).json(deletedTask);
+  } catch (err) {
+    // Prisma error P2025 means no matching owned task was found.
+    if (err.code === "P2025") {
+      return res.status(404).json({
+        message: "Task not found.",
+      });
+    }
+
+    // Pass unexpected database errors to the global error handler.
+    return next(err);
   }
-
-
-  const deletedTask = sanitizeTask(global.tasks[taskIndex]);
-
-  // Splice used to remove the task from the in-memory array.
-  global.tasks.splice(taskIndex, 1);
-
-  // Response status 200 with the deleted task
-  return res.status(200).json(deletedTask);
 }
 
 // Export the controller functions for use by routes/taskRoutes.js.
 module.exports = {
   create,
+  bulkCreate,
   index,
   show,
   update,
