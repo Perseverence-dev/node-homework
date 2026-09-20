@@ -1,29 +1,219 @@
-Node Homework Final Project Week 11
+Node Homework Final Project – Week 11
 
 Deployed application:
 https://node-homework-ya.onrender.com
+
+Health endpoint:
+GET /health
 
 Project overview:
 This project is a Node.js and Express REST API for managing user-owned tasks. Users can register, log on, create tasks, retrieve tasks, update task details, mark tasks complete, delete tasks, and log off.
 
 Database:
-The application uses PostgreSQL hosted on Neon. Prisma provides the data model, database queries, relationships, and migrations.
+The application uses PostgreSQL hosted on Neon. Prisma provides the data model, database queries, relationships, transactions, and migrations.
 
 Security:
-- Passwords are salted and hashed with Node.js crypto.scrypt.
-- Authentication uses signed JWTs stored in HttpOnly cookies.
-- CSRF tokens protect requests that change data.
-- Google reCAPTCHA protects user registration.
-- Helmet adds security-related HTTP headers.
-- Rate limiting reduces automated abuse.
-- Request data is sanitized to reduce XSS risks.
-- Task routes require authentication and enforce task ownership.
+
+* Passwords are salted and hashed with Node.js crypto.scrypt.
+* Authentication uses signed JWTs stored in HttpOnly cookies.
+* CSRF tokens protect requests that change data.
+* Google reCAPTCHA protects user registration.
+* Helmet adds security-related HTTP headers.
+* Rate limiting reduces automated abuse.
+* Request data is sanitized to reduce XSS risks.
+* Joi validates registration and task data.
+* Task queries use both the task ID and authenticated user ID to enforce ownership.
+
+Authentication:
+The task and analytics endpoints require a valid JWT cookie. POST, PATCH, and DELETE task requests also require the CSRF token returned during registration or logon.
+
+Header for protected data-changing requests:
+X-CSRF-Token: <csrfToken>
+
+TASK API
+
+1. Retrieve the authenticated user’s tasks
+
+Method and path:
+GET /api/tasks
+
+Optional query parameters:
+
+* page: Positive integer specifying the page number. Default: 1.
+* limit: Number of results per page from 1 through 100. Default: 10.
+* find: Case-insensitive text used to search task titles.
+
+Example:
+GET /api/tasks?page=1&limit=10&find=deployment
+
+The response contains the matching tasks and pagination metadata, including the current page, limit, total number of matching tasks, total pages, hasNext, and hasPrev.
+
+2. Retrieve one task
+
+Method and path:
+GET /api/tasks/:id
+
+Path parameter:
+
+* id: Positive integer identifying the task.
+
+The API returns the task only when it belongs to the authenticated user. A missing task or a task belonging to another user returns 404.
+
+Example:
+GET /api/tasks/12
+
+3. Create one task
+
+Method and path:
+POST /api/tasks
+
+Required headers:
+Content-Type: application/json
+X-CSRF-Token: <csrfToken>
+
+Example request body:
+{
+"title": "Review deployment",
+"isCompleted": false,
+"priority": "high"
+}
+
+Validation:
+
+* title is required and must contain 3 through 30 characters.
+* isCompleted is optional and defaults to false.
+* priority is optional, accepts low, medium, or high, and defaults to medium.
+
+Successful creation returns 201 Created.
+
+4. Create multiple tasks
+
+Method and path:
+POST /api/tasks/bulk
+
+Required headers:
+Content-Type: application/json
+X-CSRF-Token: <csrfToken>
+
+Example request body:
+{
+"tasks": [
+{
+"title": "Test registration",
+"priority": "high"
+},
+{
+"title": "Check deployment",
+"isCompleted": false,
+"priority": "medium"
+}
+]
+}
+
+The tasks property must be a non-empty array. Every item is validated before anything is inserted. Successful bulk creation returns 201 Created with the number of tasks created.
+
+5. Update one task
+
+Method and path:
+PATCH /api/tasks/:id
+
+Path parameter:
+
+* id: Positive integer identifying the task.
+
+Required headers:
+Content-Type: application/json
+X-CSRF-Token: <csrfToken>
+
+Example request body:
+{
+"isCompleted": true,
+"priority": "low"
+}
+
+The request may update title, isCompleted, priority, or any valid combination of these fields. The task must belong to the authenticated user.
+
+Successful updates return 200 OK.
+
+6. Delete one task
+
+Method and path:
+DELETE /api/tasks/:id
+
+Path parameter:
+
+* id: Positive integer identifying the task.
+
+Required header:
+X-CSRF-Token: <csrfToken>
+
+The task is deleted only when it belongs to the authenticated user. Successful deletion returns 200 OK with the deleted task.
+
+ANALYTICS API
+
+All analytics routes are mounted under /api/analytics and require authentication.
+
+1. Retrieve analytics for one user
+
+Method and path:
+GET /api/analytics/users/:id
+
+Path parameter:
+
+* id: Positive integer identifying the user.
+
+The response includes:
+
+* Task counts grouped by completion status.
+* The user’s ten most recently created tasks.
+* Task-creation activity from the last seven days.
+
+Possible responses:
+
+* 200 OK when the analytics are returned.
+* 400 Bad Request when the user ID is invalid.
+* 404 Not Found when the user does not exist.
+
+2. Retrieve users with task statistics
+
+Method and path:
+GET /api/analytics/users
+
+Optional query parameters:
+
+* page: Positive integer specifying the page number. Default: 1.
+* limit: Number of users per page from 1 through 100. Default: 10.
+
+Example:
+GET /api/analytics/users?page=1&limit=10
+
+Each user record contains safe public user information, the total task count, and up to five incomplete task IDs. The response also includes pagination metadata. Password hashes are never returned.
+
+3. Search tasks and user names
+
+Method and path:
+GET /api/analytics/tasks/search
+
+Query parameters:
+
+* q: Required search text containing at least two characters.
+* limit: Optional maximum number of results from 1 through 100. Default: 20.
+
+Example:
+GET /api/analytics/tasks/search?q=deployment&limit=20
+
+The endpoint uses parameterized PostgreSQL raw SQL to search task titles and user names without directly inserting user input into the SQL statement. Results are ranked by exact title match, title prefix match, partial match, and creation date.
 
 Additional capabilities:
-- Tasks support priorities.
-- Task retrieval supports filtering, sorting, and pagination.
-- Analytics routes provide task-related summaries.
+
+* Task priorities: low, medium, and high.
+* Task-title searching.
+* Pagination for tasks and users.
+* Bulk task creation.
+* Per-user task analytics.
+* Recent task activity.
+* Parameterized analytics search.
+* User-owned task access control.
 
 Deployment:
-The PostgreSQL database is hosted on Neon, and the backend is deployed as a Render Web Service.
-                                                                                              
+The PostgreSQL database is hosted on Neon, and the backend is deployed as a Render Web Service. Render installs the production dependencies, applies Prisma migrations, and starts the Express application.

@@ -20,7 +20,9 @@ if (!user) {
     let i = 0;
     while (i<100) {
         let newTask = {};
-        newTask.title = faker.lorem.sentence({ min: 3, max: 5 });
+        // Generate a title and limit it to the 30-character Joi maximum.
+        newTask.title = faker.lorem.words({ min: 3, max: 5 }).slice(0, 30).trim();
+        newTask.description = faker.lorem.paragraphs({ min: 1, max: 3 }).slice(0, 200).trim();
         newTask.userId = user.id;
         newTask.createdAt = getRandomDateTimeLast5Weeks();
         newTask.isCompleted = (Math.random() > 0.5); 
