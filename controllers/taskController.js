@@ -239,12 +239,14 @@ async function show(req, res, next) {
   }
 
   try {
-    // Match both the task ID and its owner.
-    // This prevents one user from viewing another user's task.
+    // Use the compound unique key defined in schema.prisma.
+    // Matching both values enforces ownership in the database query.
     const task = await prisma.task.findUnique({
       where: {
-        id: taskId,
-        userId: req.user.id,
+        id_userId: {
+          id: taskId,
+          userId: req.user.id,
+        },
       },
       select: {
         id: true,
@@ -263,7 +265,7 @@ async function show(req, res, next) {
       },
     });
 
-    // findUnique() returns null when no matching task is found.
+    // findUnique() returns null when no matching owner task is found.
     // The same response avoids revealing another user's private data.
     if (!task) {
       return res.status(404).json({
@@ -313,12 +315,15 @@ async function update(req, res, next) {
   }
 
   try {
-    // Update only a task matching both the ID and its owner.
+
+    // Update only the task matching the compound task-and-owner key.
     // Prisma accepts the validated camelCase fields directly.
     const updatedTask = await prisma.task.update({
       where: {
-        id: taskId,
-        userId: req.user.id,
+        id_userId: {
+         id: taskId,
+         userId: req.user.id,
+        },
       },
       data: taskChange,
       select: {
@@ -360,12 +365,15 @@ async function deleteTask(req, res, next) {
   }
 
   try {
-    // Delete only a task matching both the ID and its owner.
+
+    // Delete only the task matching the compound task-and-owner key.
     // Prisma returns the deleted task for the response.
     const deletedTask = await prisma.task.delete({
       where: {
-        id: taskId,
-        userId: req.user.id,
+        id_userId: {
+          id: taskId,
+          userId: req.user.id,
+        },
       },
       select: {
         id: true,
