@@ -24,6 +24,7 @@ const { app, server } = require("../app");
 let agent;
 let saveRes;
 let csrfToken;
+let taskId;
 
 const testUser = {
   name: "John Deere",
@@ -89,13 +90,76 @@ describe("register, authenticate, and log off a user", () => {
     expect(saveRes.status).toBe(200);
   });
 
-  it("50. permits the logged-in user to access task routes", async () => {
-    const response = await agent.get("/api/tasks");
+ it("50. retrieves the authenticated user's task list", async () => {
+  const response = await agent.get("/api/tasks");
 
-    expect(response.status).not.toBe(401);
-  });
+  expect(response.status).toBe(200);
+  expect(response.body.tasks).toBeInstanceOf(Array);
+  expect(response.body.pagination).toBeDefined();
+});
 
-  it("51. logs off the authenticated user", async () => {
+it("51. creates a task through the REST API", async () => {
+  const response = await agent
+    .post("/api/tasks")
+    .set("X-CSRF-Token", csrfToken)
+    .send({
+      title: "Test REST task operations",
+      priority: "high",
+    });
+
+  expect(response.status).toBe(201);
+  expect(response.body.id).toBeDefined();
+  expect(response.body.title).toBe("Test REST task operations");
+  expect(response.body.priority).toBe("high");
+  expect(response.body.isCompleted).toBe(false);
+
+  taskId = response.body.id;
+});
+
+it("52. retrieves one task through the REST API", async () => {
+  const response = await agent.get(`/api/tasks/${taskId}`);
+
+  expect(response.status).toBe(200);
+  expect(response.body.id).toBe(taskId);
+  expect(response.body.title).toBe("Test REST task operations");
+  expect(response.body.priority).toBe("high");
+});
+
+it("53. updates the task through the REST API", async () => {
+  const response = await agent
+    .patch(`/api/tasks/${taskId}`)
+    .set("X-CSRF-Token", csrfToken)
+    .send({
+      title: "Updated REST task",
+      isCompleted: true,
+      priority: "low",
+    });
+
+  expect(response.status).toBe(200);
+  expect(response.body.id).toBe(taskId);
+  expect(response.body.title).toBe("Updated REST task");
+  expect(response.body.isCompleted).toBe(true);
+  expect(response.body.priority).toBe("low");
+});
+
+it("54. deletes the task through the REST API", async () => {
+  const response = await agent
+    .delete(`/api/tasks/${taskId}`)
+    .set("X-CSRF-Token", csrfToken);
+
+  expect(response.status).toBe(200);
+  expect(response.body.id).toBe(taskId);
+});
+
+it("55. confirms that the deleted task no longer exists", async () => {
+  const response = await agent.get(`/api/tasks/${taskId}`);
+
+  expect(response.status).toBe(404);
+  expect(response.body.message).toBe("Task not found.");
+});
+
+
+it("56. logs off the authenticated user", async () => {
     const response = await agent
       .post("/api/users/logoff")
       .set("X-CSRF-TOKEN", csrfToken);
@@ -103,7 +167,7 @@ describe("register, authenticate, and log off a user", () => {
     expect(response.status).toBe(200);
   });
 
-  it("52. rejects task access after the user logs off", async () => {
+it("57. rejects task access after the user logs off", async () => {
     const response = await agent.get("/api/tasks");
 
     expect(response.status).toBe(401);
